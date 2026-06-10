@@ -83,6 +83,7 @@ jobs:
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
           ANDROID_API_LEVEL: ${{ matrix.api }}
           PYO3_CROSS_PYTHON_VERSION: "3.13"
+        working-directory: crates/jiter-python
         run: |
           NDK_BIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin
           TARGET=${{ matrix.target }}
