@@ -118,7 +118,7 @@ jobs:
             --release \
             --target $TARGET \
             --compatibility off \
-            --out dist -i python3.13
+            --out dist -i 3.13
 
       - uses: actions/upload-artifact@v4
         with:
