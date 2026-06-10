@@ -119,7 +119,9 @@ jobs:
             --release \
             --target $TARGET \
             --compatibility off \
-            --out dist -i 3.13
+            --out dist \
+            --interpreter python3.13 \
+            --manylinux off
 
       - uses: actions/upload-artifact@v4
         with:
