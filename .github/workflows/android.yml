@@ -1,0 +1,124 @@
+name: Android
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-linux-android
+            api: 24
+            arch: arm64-v8a
+          - target: armv7-linux-androideabi
+            api: 24
+            arch: armeabi-v7a
+          - target: x86_64-linux-android
+            api: 24
+            arch: x86_64
+          - target: i686-linux-android
+            api: 24
+            arch: x86
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Setup Android NDK r26d
+        uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r26d
+          link-to-sdk: true
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Add Rust Android target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Install maturin
+        run: pip install maturin
+
+      - name: Fetch Termux libpython3.13 for linking
+        run: |
+          TARGET=${{ matrix.target }}
+          case "$TARGET" in
+            aarch64-linux-android)   TERMUX_ARCH=aarch64 ;;
+            armv7-linux-androideabi) TERMUX_ARCH=arm     ;;
+            x86_64-linux-android)    TERMUX_ARCH=x86_64  ;;
+            i686-linux-android)      TERMUX_ARCH=i686    ;;
+          esac
+
+          # Locate the python package in Termux's apt repo
+          PKGS_URL="https://packages.termux.dev/apt/termux-main/dists/stable/main/binary-${TERMUX_ARCH}/Packages"
+          DEB_PATH=$(curl -sL "$PKGS_URL" | \
+            awk '/^Package: python$/{f=1} f && /^Filename:/{print $2; f=0}' | head -1)
+          echo "Downloading: $DEB_PATH"
+
+          mkdir -p /tmp/termux-py && cd /tmp/termux-py
+          curl -sL "https://packages.termux.dev/apt/termux-main/${DEB_PATH}" -o python.deb
+          ar x python.deb
+          # data archive may be .tar.xz or .tar.zst depending on Termux version
+          tar xf data.tar.* --wildcards "*/libpython3.13*" 2>/dev/null || true
+
+          LIB_DIR=/tmp/termux-py/data/data/com.termux/files/usr/lib
+          # Ensure the unversioned name exists for -lpython3.13
+          if [ ! -f "$LIB_DIR/libpython3.13.so" ]; then
+            ln -sf "$(basename $(ls $LIB_DIR/libpython3.13.so* | head -1))" \
+                   "$LIB_DIR/libpython3.13.so"
+          fi
+          echo "TERMUX_LIBDIR=$LIB_DIR" >> $GITHUB_ENV
+
+      - name: Build Android wheel
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+          ANDROID_API_LEVEL: ${{ matrix.api }}
+          PYO3_CROSS_PYTHON_VERSION: "3.13"
+        run: |
+          NDK_BIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin
+          TARGET=${{ matrix.target }}
+          API=${{ matrix.api }}
+
+          # Resolve the correct clang triple for this target + API level
+          case "$TARGET" in
+            aarch64-linux-android)   CLANG_PREFIX="aarch64-linux-android${API}" ;;
+            armv7-linux-androideabi) CLANG_PREFIX="armv7a-linux-androideabi${API}" ;;
+            x86_64-linux-android)    CLANG_PREFIX="x86_64-linux-android${API}" ;;
+            i686-linux-android)      CLANG_PREFIX="i686-linux-android${API}" ;;
+          esac
+
+          # cc-rs reads CC_<target> with lowercase triple (dashes -> underscores).
+          # CARGO_TARGET_<TARGET>_LINKER uses uppercase. Split accordingly.
+          TARGET_UPPER=$(echo "$TARGET" | tr '[:lower:]-' '[:upper:]_')
+          TARGET_LOWER=$(echo "$TARGET" | tr '-' '_')
+          export CC_${TARGET_LOWER}=$NDK_BIN/${CLANG_PREFIX}-clang
+          export CXX_${TARGET_LOWER}=$NDK_BIN/${CLANG_PREFIX}-clang++
+          export AR_${TARGET_LOWER}=$NDK_BIN/llvm-ar
+          export CARGO_TARGET_${TARGET_UPPER}_LINKER=$NDK_BIN/${CLANG_PREFIX}-clang
+
+          # Link against Termux's real libpython3.13.so (not an empty stub).
+          # This embeds DT_NEEDED: libpython3.13.so in the extension, so
+          # bionic resolves all Python symbols explicitly at dlopen time via
+          # Termux's LD_LIBRARY_PATH - instead of relying on global namespace
+          # propagation, which Android's linker does not guarantee.
+          export RUSTFLAGS="-L native=$TERMUX_LIBDIR"
+
+          maturin build \
+            --release \
+            --target $TARGET \
+            --compatibility off \
+            --out dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-android-${{ matrix.target }}
+          path: dist
